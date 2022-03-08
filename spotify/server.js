@@ -1,10 +1,14 @@
 const express = require('express');
-const Sequelize = require('sequelize');
+// var Sequelize = require('sequelize');
 var SpotifyWebApi = require('spotify-web-api-node');
-//const Data = require('./data');
-const app = express();
-const port = 8001;
+// var connection = new Sequelize('spotifyTracks', 'root', 'admin123', {
+//   dialect: 'mysql'
+// })
+const   {connection,Sequelize} = require('./connection');
+const  { TracksDao, ArtistsDao } = require('../models/artists');
 
+const app = express();
+const port = 8002;
 
 // credentials are optional
 var spotifyApi = new SpotifyWebApi({
@@ -14,70 +18,45 @@ var spotifyApi = new SpotifyWebApi({
 
 // Retrieve an access token.
 spotifyApi.clientCredentialsGrant().then(
-  function(data) {
+  function (data) {
     console.log('The access token expires in ' + data.body['expires_in']);
     console.log('The access token is ' + data.body['access_token']);
 
     // Save the access token so that it's used in future calls
     spotifyApi.setAccessToken(data.body['access_token']);
   },
-  function(err) {
+  function (err) {
     console.log('Something went wrong when retrieving an access token', err);
   }
 );
 
 
-const connection = new Sequelize('spotifyTracks', 'root', 'admin123', {
-  dialect: 'mysql'
-})
+// const TracksDao = connection.define('tracks', {
+//   title: Sequelize.STRING,
+//   spotifyImageUrl: Sequelize.TEXT,
+//   isrc: {
+//     type: Sequelize.STRING,
+//     unique: true
+//   },
+//   metadata: Sequelize.JSON
+// });
+// const ArtistsDao = connection.define('artists', {
+//   name: Sequelize.STRING,
 
-const Tracks = connection.define('Tracks',{
-  name:Sequelize.STRING
-});
+// });
 
-app.get('/tracks',(req,res)=>{
-  spotifyApi.searchTracks(`isrc:${req.query.ISRC}`)
-  //spotifyApi.searchTracks(`love`)
-  .then(function(data) {
-    res.json(data.body);
-    console.log('Search by "QMEU31910213"', req);
-  }, function(err) {
-    console.error(err);
-  });
-
-  // spotifyApi.getArtistAlbums('43ZHCT0cAZBISjO8DG9PnE').then(
-  //   function(data) {
-  //     res.json(data.body);
-  //     console.log('Artist albums', data.body);
-  //   },
-  //   function(err) {
-  //     console.error(err);
-  //   }
-  // );
-
- // Tracks.findAll().then(t=>res.json(t)).catch(error=> {console.log(error);res.status(404).send(error)});
-});
-
-var bodyParser = require('body-parser');
-app.use(bodyParser.json());
-
-// for routes looking like this `/products?page=1&pageSize=50`
-app.get('/create', function(req, res) {
-  const page = req.query.ISRC;
-  res.send(`Filter with parameters ${page}`);
-});
-
+// ArtistsDao.belongsTo(TracksDao, { as: 'TrackRef', foreignKey: 'trackId' });
 
 connection
   .authenticate()
   .then(() => {
-    console.log('Connection has been  established successfully.');
+    console.log('connection has been  established successfully.');
   })
   .catch(err => {
     console.error('Unable to connect to the database: ', err);
   });
 
-connection
+  connection
   .sync({
     logging: console.log,
     force: false
@@ -92,5 +71,100 @@ connection
     console.error('Unable to connect to the database:', err);
   });
 
- 
+ app.get('/tracks',  (req, res) => {
+  const isrc = req.query.isrc;
+  if (!isrc) {
+    res.status(400);
+    res.json(
+      {
+        errorMessage: "Missing required parameter."
+      }
+    )
+    return;
+  }
+  spotifyApi.searchTracks(`isrc:${isrc}`)
+    //spotifyApi.searchTracks(`love`)
+    .then(function (data) {
+      console.log(data);
+      if (data?.body?.tracks?.items?.length <= 0) {
+        res.status(404);
+        res.json(
+          {
+            errorMessage: "ISRC not found in Spotify."
+          }
+        )
+        return;
+      }
+      let results = data.body;
+      let track = results.tracks;
+      let popular = track.items.sort((a, b) => b.popularity - a.popularity)[0];
+
+       TracksDao.create({
+        trackId: popular.id, //string
+        title: popular.name,
+        isrc: popular.external_ids.isrc,
+        metadata: popular
+
+      })
+        .then((rec) => {
+          let artitstsAry = popular.artists.map((ele) => {
+            return {
+              name: ele.name,
+              trackId: rec.dataValues.id
+            }
+          });
+           ArtistsDao.bulkCreate(artitstsAry)
+            .then(() => {
+              res.status(201);
+              res.json({
+                status: "Sucess"
+              })
+              return;
+            })
+            .catch(error => {
+              console.log(error);
+            })
+
+        })
+        .catch(error => {
+          if (error.name === "SequelizeUniqueConstraintError") {
+            res.status(400).send;
+            res.json({
+              errorMessage: "Duplicate ISRC code found."
+            })
+            return;
+          }
+          console.log(error);
+        })
+      // res.json(popular);
+    }, function (err) {
+      console.error(err);
+    });
+});
+
+app.get('/track-isrc', (req, res) => {
+  TracksDao.findOne({
+    where: { isrc: req.query.isrc }
+  })
+    .then(track => {
+      res.json(track);
+    })
+    .catch(error => {
+      console.log(error);
+      res.status(404).send(error);
+    })
+})
+app.get('/track-artist', (req, res) => {
+  ArtistsDao.findAll({
+    where: { name: { [Sequelize.Op.like]: `%${req.query.name}%` } },
+    include: [{ model: TracksDao, as: 'TrackRef' }]
+  })
+    .then(artist => {
+      res.json(artist);
+    })
+    .catch(error => {
+      console.log(error);
+      res.status(404).send(error);
+    })
+})
 
